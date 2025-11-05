@@ -9,6 +9,8 @@
 
 #include "types/device_stats.h"
 #include "ble/BLECallbacks.h"
+#include "wifi/WiFiManager.h"
+#include "wifi/WiFiCredentials.h"
 
 #define FIRMWARE_VERSION "1.0.0"
 // Firmware version and UUIDs
@@ -22,6 +24,7 @@ BLECharacteristic *pWiFiCharacteristic;
 BLECharacteristic *pStatsCharacteristic;
 
 DeviceStats deviceStats;
+WiFiManager wifiManager;
 
 volatile bool deviceConnected = false;
 
@@ -35,6 +38,12 @@ void setup() {
   digitalWrite(2, LOW);
 
   WiFi.mode(WIFI_STA);
+
+  String ssid, password;
+  if (WiFiCredentials::load(ssid, password)) {
+    Serial.println("Connecting to saved WiFi...");
+    WiFi.begin(ssid.c_str(), password.c_str());
+  }
 
   String device_name("OpenVibe");
   String device_id(base64::encode(WiFi.macAddress()));
@@ -83,14 +92,14 @@ void updateAndSendStats() {
   String jsonString;
   serializeJson(doc, jsonString);
 
-  if (deviceConnected && pStatsCharacteristic != nullptr) {
-    Serial.println("Attempting to send BLE notification...");
+  String jsonCopy = jsonString;
+  if (wifiManager.isWebSocketConnected()) {
+    wifiManager.sendStats(jsonCopy);
+    Serial.println("Stats sent via WebSocket: " + jsonString);
+  } else if (deviceConnected && pStatsCharacteristic != nullptr) {
     pStatsCharacteristic->setValue(jsonString.c_str());
     pStatsCharacteristic->notify();
-    Serial.println("Stats notification triggered (client must enable notifications to receive it)");
-    Serial.println("Stats JSON: " + jsonString);
-  } else {
-    Serial.println("Not sending stats - deviceConnected: " + String(deviceConnected) + ", pStatsCharacteristic: " + String(pStatsCharacteristic != nullptr));
+    Serial.println("Stats sent via BLE: " + jsonString);
   }
 }
 
@@ -98,6 +107,7 @@ void loop() {
   static bool lastLedState = false;
   static unsigned long lastStatsUpdate = 0;
   static bool lastConnectionState = false;
+  static bool wifiManagerStarted = false;
   bool connected = isBLEConnected();
 
   if (!connected && lastConnectionState) {
@@ -111,6 +121,13 @@ void loop() {
     digitalWrite(2, connected ? HIGH : LOW);
     Serial.println(connected ? "Device connected" : "Device disconnected");
   }
+
+  if (WiFi.status() == WL_CONNECTED && !wifiManagerStarted) {
+    wifiManager.begin();
+    wifiManagerStarted = true;
+  }
+
+  wifiManager.loop();
 
   unsigned long currentMillis = millis();
   if (currentMillis - lastStatsUpdate >= 5000) {

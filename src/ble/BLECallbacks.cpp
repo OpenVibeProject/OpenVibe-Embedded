@@ -1,5 +1,6 @@
 #include "BLECallbacks.h"
 #include "../../include/types/device_stats.h"
+#include "../wifi/WiFiCredentials.h"
 #include <BLEDevice.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -50,6 +51,7 @@ void WiFiConfigCharacteristicHandler::onWrite(BLECharacteristic* characteristic)
     Serial.println("\nWi-Fi connected!");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
+    WiFiCredentials::save(ssid, password);
     updateAndSendStats();
   } else {
     Serial.println("\nFailed to connect to Wi-Fi.");
