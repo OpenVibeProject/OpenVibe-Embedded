@@ -34,7 +34,6 @@ These versions reflect the environment used during the most recent successful bu
   - Notification payload (example):
     ```json
     {
-      "uptimeMillis": 123456,
       "intensity": 50,
       "battery": 100,
       "isCharging": false,

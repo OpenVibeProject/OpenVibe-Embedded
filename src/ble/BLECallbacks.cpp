@@ -33,27 +33,41 @@ void WiFiConfigCharacteristicHandler::onWrite(BLECharacteristic* characteristic)
     return;
   }
 
-  const char* ssid = doc["ssid"];
-  const char* password = doc["password"];
-  Serial.print("Connecting to Wi-Fi SSID: ");
-  Serial.println(ssid);
+  const char* requestType = doc["requestType"];
+  if (!requestType) return;
 
-  WiFi.begin(ssid, password);
+  if (strcmp(requestType, "STATUS") == 0) {
+    extern bool statusRequested;
+    statusRequested = true;
+  } else if (strcmp(requestType, "INTENSITY") == 0) {
+    extern DeviceStats deviceStats;
+    deviceStats.intensity = doc["intensity"];
+    Serial.print("Intensity set to: ");
+    Serial.println(deviceStats.intensity);
+  } else if (strcmp(requestType, "WIFI_CREDENTIALS") == 0) {
+    const char* ssid = doc["ssid"];
+    const char* password = doc["password"];
+    Serial.print("Connecting to Wi-Fi SSID: ");
+    Serial.println(ssid);
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
+    WiFi.begin(ssid, password);
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWi-Fi connected!");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
-    WiFiCredentials::save(ssid, password);
-    updateAndSendStats();
-  } else {
-    Serial.println("\nFailed to connect to Wi-Fi.");
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nWi-Fi connected!");
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
+      WiFiCredentials::save(ssid, password);
+      extern bool statusRequested;
+      statusRequested = true;
+    } else {
+      Serial.println("\nFailed to connect to Wi-Fi.");
+    }
   }
 }

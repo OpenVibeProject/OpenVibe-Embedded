@@ -27,6 +27,7 @@ DeviceStats deviceStats;
 WiFiManager wifiManager;
 
 volatile bool deviceConnected = false;
+bool statusRequested = false;
 
 void updateAndSendStats();
 
@@ -73,13 +74,11 @@ void updateAndSendStats() {
   deviceStats.macAddress = WiFi.macAddress();
   deviceStats.ipAddress = deviceStats.isWifiConnected ? WiFi.localIP().toString() : "";
 
-  deviceStats.battery = 100;
+  deviceStats.battery = random(0, 101);
   deviceStats.isCharging = false;
-  deviceStats.intensity = 50;
 
   DynamicJsonDocument doc(512);
   unsigned long uptime = millis();
-  doc["uptimeMillis"] = uptime;
   doc["intensity"] = deviceStats.intensity;
   doc["battery"] = deviceStats.battery;
   doc["isCharging"] = deviceStats.isCharging;
@@ -105,7 +104,6 @@ void updateAndSendStats() {
 
 void loop() {
   static bool lastLedState = false;
-  static unsigned long lastStatsUpdate = 0;
   static bool lastConnectionState = false;
   static bool wifiManagerStarted = false;
   bool connected = isBLEConnected();
@@ -129,11 +127,10 @@ void loop() {
 
   wifiManager.loop();
 
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastStatsUpdate >= 5000) {
-    lastStatsUpdate = currentMillis;
+  if (statusRequested) {
+    statusRequested = false;
     updateAndSendStats();
   }
 
-  delay(100);
+  delay(10);
 }
