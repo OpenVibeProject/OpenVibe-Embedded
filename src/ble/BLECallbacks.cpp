@@ -69,5 +69,27 @@ void WiFiConfigCharacteristicHandler::onWrite(BLECharacteristic* characteristic)
     } else {
       Serial.println("\nFailed to connect to Wi-Fi.");
     }
+  } else if (strcmp(requestType, "SWITCH_TRANSPORT") == 0) {
+    extern DeviceStats deviceStats;
+    const char* transport = doc["transport"];
+    
+    if (strcmp(transport, "BLE") == 0) {
+      deviceStats.transport = TRANSPORT_BLE;
+      Serial.println("Switched to BLE transport");
+    } else if (strcmp(transport, "WIFI") == 0) {
+      deviceStats.transport = TRANSPORT_WIFI;
+      Serial.println("Switched to WIFI transport");
+    } else if (strcmp(transport, "REMOTE") == 0) {
+      deviceStats.transport = TRANSPORT_REMOTE;
+      const char* serverAddress = doc["serverAddress"];
+      if (serverAddress) {
+        deviceStats.serverAddress = String(serverAddress);
+        Serial.print("Switched to REMOTE transport: ");
+        Serial.println(deviceStats.serverAddress);
+      }
+    }
+    
+    extern bool statusRequested;
+    statusRequested = true;
   }
 }

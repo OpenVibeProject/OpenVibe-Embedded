@@ -30,8 +30,11 @@ volatile bool deviceConnected = false;
 bool statusRequested = false;
 
 void updateAndSendStats();
+void handleTransportChange();
 
 bool isBLEConnected() { return deviceConnected; }
+
+TransportMode lastTransportMode = TRANSPORT_BLE;
 
 void setup() {
   Serial.begin(115200);
@@ -87,15 +90,31 @@ void updateAndSendStats() {
   doc["ipAddress"] = deviceStats.ipAddress;
   doc["macAddress"] = deviceStats.macAddress;
   doc["version"] = deviceStats.version;
+  doc["deviceId"] = String((uint32_t)ESP.getEfuseMac(), HEX);
+  
+  // Add transport mode to stats
+  const char* transportStr = "BLE";
+  if (deviceStats.transport == TRANSPORT_WIFI) transportStr = "WIFI";
+  else if (deviceStats.transport == TRANSPORT_REMOTE) transportStr = "REMOTE";
+  doc["transport"] = transportStr;
+  
+  if (deviceStats.transport == TRANSPORT_REMOTE && !deviceStats.serverAddress.isEmpty()) {
+    doc["serverAddress"] = deviceStats.serverAddress;
+  }
 
   String jsonString;
   serializeJson(doc, jsonString);
 
   String jsonCopy = jsonString;
-  if (wifiManager.isWebSocketConnected()) {
+  
+  // Send stats based on current transport mode
+  if (deviceStats.transport == TRANSPORT_REMOTE && wifiManager.isRemoteConnected()) {
     wifiManager.sendStats(jsonCopy);
-    Serial.println("Stats sent via WebSocket: " + jsonString);
-  } else if (deviceConnected && pStatsCharacteristic != nullptr) {
+    Serial.println("Stats sent via Remote WebSocket: " + jsonString);
+  } else if (deviceStats.transport == TRANSPORT_WIFI && wifiManager.isWebSocketConnected()) {
+    wifiManager.sendStats(jsonCopy);
+    Serial.println("Stats sent via WiFi WebSocket: " + jsonString);
+  } else if (deviceStats.transport == TRANSPORT_BLE && deviceConnected && pStatsCharacteristic != nullptr) {
     pStatsCharacteristic->setValue(jsonString.c_str());
     pStatsCharacteristic->notify();
     Serial.println("Stats sent via BLE: " + jsonString);
@@ -132,5 +151,22 @@ void loop() {
     updateAndSendStats();
   }
 
+  handleTransportChange();
+  
   delay(10);
+}
+
+void handleTransportChange() {
+  if (deviceStats.transport != lastTransportMode) {
+    Serial.print("Transport mode changed from ");
+    Serial.print(lastTransportMode);
+    Serial.print(" to ");
+    Serial.println(deviceStats.transport);
+    
+    if (deviceStats.transport == TRANSPORT_REMOTE && !deviceStats.serverAddress.isEmpty()) {
+      wifiManager.connectToRemote(deviceStats.serverAddress);
+    }
+    
+    lastTransportMode = deviceStats.transport;
+  }
 }

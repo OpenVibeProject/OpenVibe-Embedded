@@ -4,6 +4,12 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
+enum TransportMode {
+    TRANSPORT_BLE,
+    TRANSPORT_WIFI,
+    TRANSPORT_REMOTE
+};
+
 // Device state structure
 struct DeviceStats {
     int intensity = 0;
@@ -14,6 +20,8 @@ struct DeviceStats {
     String ipAddress;
     String macAddress;
     const char* version = "1.0.0";
+    TransportMode transport = TRANSPORT_BLE;
+    String serverAddress;
 };
 
 // Shared connection flag (defined in a single translation unit)
