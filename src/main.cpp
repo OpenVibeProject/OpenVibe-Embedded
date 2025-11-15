@@ -142,6 +142,11 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED && !wifiManagerStarted) {
     wifiManager.begin();
     wifiManagerStarted = true;
+    
+    // Only start WebSocket server if transport mode is WIFI
+    if (deviceStats.transport == TRANSPORT_WIFI) {
+      wifiManager.startWebSocketServer();
+    }
   }
 
   wifiManager.loop();
@@ -163,7 +168,17 @@ void handleTransportChange() {
     Serial.print(" to ");
     Serial.println(deviceStats.transport);
     
-    if (deviceStats.transport == TRANSPORT_REMOTE && !deviceStats.serverAddress.isEmpty()) {
+    // Close previous connections
+    if (lastTransportMode == TRANSPORT_WIFI) {
+      wifiManager.stopWebSocketServer();
+    } else if (lastTransportMode == TRANSPORT_REMOTE) {
+      wifiManager.disconnectRemote();
+    }
+    
+    // Start new connections based on transport mode
+    if (deviceStats.transport == TRANSPORT_WIFI && WiFi.status() == WL_CONNECTED) {
+      wifiManager.startWebSocketServer();
+    } else if (deviceStats.transport == TRANSPORT_REMOTE && !deviceStats.serverAddress.isEmpty()) {
       wifiManager.connectToRemote(deviceStats.serverAddress);
     }
     

@@ -71,8 +71,12 @@ void WiFiConfigCharacteristicHandler::onWrite(BLECharacteristic* characteristic)
     }
   } else if (strcmp(requestType, "SWITCH_TRANSPORT") == 0) {
     extern DeviceStats deviceStats;
-    const char* transport = doc["transport"];
+    extern bool statusRequested;
     
+    // Send status on current transport before switching
+    statusRequested = true;
+    
+    const char* transport = doc["transport"];
     if (strcmp(transport, "BLE") == 0) {
       deviceStats.transport = TRANSPORT_BLE;
       Serial.println("Switched to BLE transport");
@@ -88,8 +92,5 @@ void WiFiConfigCharacteristicHandler::onWrite(BLECharacteristic* characteristic)
         Serial.println(deviceStats.serverAddress);
       }
     }
-    
-    extern bool statusRequested;
-    statusRequested = true;
   }
 }

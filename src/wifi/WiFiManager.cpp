@@ -12,17 +12,7 @@ WiFiManager::WiFiManager() : webSocket(nullptr), wsClient(nullptr), wsConnected(
 }
 
 void WiFiManager::begin() {
-    if (WiFi.status() != WL_CONNECTED) return;
-    
-    webSocket = new WebSocketsServer(6969);
-    webSocket->begin();
-    webSocket->onEvent(webSocketEventWrapper);
-    webSocket->enableHeartbeat(15000, 5000, 3);
-    
-    Serial.println("WebSocket server started on port 6969");
-    Serial.print("WebSocket URL: ws://");
-    Serial.print(WiFi.localIP());
-    Serial.println(":6969");
+    // WiFiManager is initialized but WebSocket connections are started based on transport mode
 }
 
 void WiFiManager::loop() {
@@ -58,12 +48,40 @@ bool WiFiManager::isRemoteConnected() {
     return wsClientConnected;
 }
 
-void WiFiManager::connectToRemote(const String& url) {
+void WiFiManager::startWebSocketServer() {
+    if (WiFi.status() != WL_CONNECTED || webSocket) return;
+    
+    webSocket = new WebSocketsServer(6969);
+    webSocket->begin();
+    webSocket->onEvent(webSocketEventWrapper);
+    webSocket->enableHeartbeat(15000, 5000, 3);
+    
+    Serial.println("WebSocket server started on port 6969");
+    Serial.print("WebSocket URL: ws://");
+    Serial.print(WiFi.localIP());
+    Serial.println(":6969");
+}
+
+void WiFiManager::stopWebSocketServer() {
+    if (webSocket) {
+        delete webSocket;
+        webSocket = nullptr;
+        wsConnected = false;
+        Serial.println("WebSocket server stopped");
+    }
+}
+
+void WiFiManager::disconnectRemote() {
     if (wsClient) {
         delete wsClient;
         wsClient = nullptr;
         wsClientConnected = false;
+        Serial.println("Remote WebSocket disconnected");
     }
+}
+
+void WiFiManager::connectToRemote(const String& url) {
+    disconnectRemote();
     
     if (url.isEmpty()) {
         Serial.println("Remote URL is empty");
@@ -173,8 +191,12 @@ void WiFiManager::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload,
                 Serial.println(deviceStats.intensity);
             } else if (strcmp(requestType, "SWITCH_TRANSPORT") == 0) {
                 extern DeviceStats deviceStats;
-                const char* transport = doc["transport"];
+                extern bool statusRequested;
                 
+                // Send status on current transport before switching
+                statusRequested = true;
+                
+                const char* transport = doc["transport"];
                 if (strcmp(transport, "BLE") == 0) {
                     deviceStats.transport = TRANSPORT_BLE;
                     Serial.println("Switched to BLE transport");
@@ -190,9 +212,6 @@ void WiFiManager::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload,
                         Serial.println(deviceStats.serverAddress);
                     }
                 }
-                
-                extern bool statusRequested;
-                statusRequested = true;
             }
             break;
         }

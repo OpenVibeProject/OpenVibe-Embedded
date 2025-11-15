@@ -14,6 +14,9 @@ public:
     bool isWebSocketConnected();
     void connectToRemote(const String& url);
     bool isRemoteConnected();
+    void startWebSocketServer();
+    void stopWebSocketServer();
+    void disconnectRemote();
 
 private:
     WebSocketsServer* webSocket;
