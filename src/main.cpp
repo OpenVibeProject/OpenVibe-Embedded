@@ -31,6 +31,7 @@ bool statusRequested = false;
 
 void updateAndSendStats();
 void handleTransportChange();
+void sendStatusWithNewTransport(TransportMode newTransport, const String& serverAddr = "");
 
 bool isBLEConnected() { return deviceConnected; }
 
@@ -159,6 +160,23 @@ void loop() {
   handleTransportChange();
   
   delay(10);
+}
+
+void sendStatusWithNewTransport(TransportMode newTransport, const String& serverAddr) {
+  TransportMode originalTransport = deviceStats.transport;
+  String originalServerAddr = deviceStats.serverAddress;
+  
+  // Temporarily set new transport for status response
+  deviceStats.transport = newTransport;
+  if (!serverAddr.isEmpty()) {
+    deviceStats.serverAddress = serverAddr;
+  }
+  
+  updateAndSendStats();
+  
+  // Restore original values
+  deviceStats.transport = originalTransport;
+  deviceStats.serverAddress = originalServerAddr;
 }
 
 void handleTransportChange() {

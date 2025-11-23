@@ -191,27 +191,32 @@ void WiFiManager::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload,
                 Serial.println(deviceStats.intensity);
             } else if (strcmp(requestType, "SWITCH_TRANSPORT") == 0) {
                 extern DeviceStats deviceStats;
-                extern bool statusRequested;
-                
-                // Send status on current transport before switching
-                statusRequested = true;
+                extern void sendStatusWithNewTransport(TransportMode newTransport, const String& serverAddr);
                 
                 const char* transport = doc["transport"];
+                TransportMode newTransport = deviceStats.transport;
+                String serverAddr = "";
+                
                 if (strcmp(transport, "BLE") == 0) {
-                    deviceStats.transport = TRANSPORT_BLE;
-                    Serial.println("Switched to BLE transport");
+                    newTransport = TRANSPORT_BLE;
                 } else if (strcmp(transport, "WIFI") == 0) {
-                    deviceStats.transport = TRANSPORT_WIFI;
-                    Serial.println("Switched to WIFI transport");
+                    newTransport = TRANSPORT_WIFI;
                 } else if (strcmp(transport, "REMOTE") == 0) {
-                    deviceStats.transport = TRANSPORT_REMOTE;
+                    newTransport = TRANSPORT_REMOTE;
                     const char* serverAddress = doc["serverAddress"];
                     if (serverAddress) {
-                        deviceStats.serverAddress = String(serverAddress);
-                        Serial.print("Switched to REMOTE transport: ");
-                        Serial.println(deviceStats.serverAddress);
+                        serverAddr = String(serverAddress);
                     }
                 }
+                
+                sendStatusWithNewTransport(newTransport, serverAddr);
+                
+                deviceStats.transport = newTransport;
+                if (!serverAddr.isEmpty()) {
+                    deviceStats.serverAddress = serverAddr;
+                }
+                Serial.print("Switched to transport: ");
+                Serial.println(newTransport);
             }
             break;
         }
