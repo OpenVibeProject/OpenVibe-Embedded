@@ -54,7 +54,6 @@ void WiFiManager::startWebSocketServer() {
     webSocket = new WebSocketsServer(6969);
     webSocket->begin();
     webSocket->onEvent(webSocketEventWrapper);
-    webSocket->enableHeartbeat(15000, 5000, 3);
     
     Serial.println("WebSocket server started on port 6969");
     Serial.print("WebSocket URL: ws://");

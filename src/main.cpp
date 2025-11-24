@@ -163,20 +163,48 @@ void loop() {
 }
 
 void sendStatusWithNewTransport(TransportMode newTransport, const String& serverAddr) {
-  TransportMode originalTransport = deviceStats.transport;
-  String originalServerAddr = deviceStats.serverAddress;
+  deviceStats.isBluetoothConnected = deviceConnected;
+  deviceStats.isWifiConnected = (WiFi.status() == WL_CONNECTED);
+  deviceStats.macAddress = WiFi.macAddress();
+  deviceStats.ipAddress = deviceStats.isWifiConnected ? WiFi.localIP().toString() : "";
+  deviceStats.battery = random(0, 101);
+  deviceStats.isCharging = false;
+
+  DynamicJsonDocument doc(512);
+  doc["intensity"] = deviceStats.intensity;
+  doc["battery"] = deviceStats.battery;
+  doc["isCharging"] = deviceStats.isCharging;
+  doc["isBluetoothConnected"] = deviceStats.isBluetoothConnected;
+  doc["isWifiConnected"] = deviceStats.isWifiConnected;
+  doc["ipAddress"] = deviceStats.ipAddress;
+  doc["macAddress"] = deviceStats.macAddress;
+  doc["version"] = deviceStats.version;
+  doc["deviceId"] = String((uint32_t)ESP.getEfuseMac(), HEX);
   
-  // Temporarily set new transport for status response
-  deviceStats.transport = newTransport;
-  if (!serverAddr.isEmpty()) {
-    deviceStats.serverAddress = serverAddr;
+  const char* transportStr = "BLE";
+  if (newTransport == TRANSPORT_WIFI) transportStr = "WIFI";
+  else if (newTransport == TRANSPORT_REMOTE) transportStr = "REMOTE";
+  doc["transport"] = transportStr;
+  
+  if (newTransport == TRANSPORT_REMOTE && !serverAddr.isEmpty()) {
+    doc["serverAddress"] = serverAddr;
   }
+
+  String jsonString;
+  serializeJson(doc, jsonString);
   
-  updateAndSendStats();
-  
-  // Restore original values
-  deviceStats.transport = originalTransport;
-  deviceStats.serverAddress = originalServerAddr;
+  // Send on current transport channel
+  if (deviceStats.transport == TRANSPORT_REMOTE && wifiManager.isRemoteConnected()) {
+    wifiManager.sendStats(jsonString);
+    Serial.println("Status sent via Remote WebSocket: " + jsonString);
+  } else if (deviceStats.transport == TRANSPORT_WIFI && wifiManager.isWebSocketConnected()) {
+    wifiManager.sendStats(jsonString);
+    Serial.println("Status sent via WiFi WebSocket: " + jsonString);
+  } else if (deviceStats.transport == TRANSPORT_BLE && deviceConnected && pStatsCharacteristic != nullptr) {
+    pStatsCharacteristic->setValue(jsonString.c_str());
+    pStatsCharacteristic->notify();
+    Serial.println("Status sent via BLE: " + jsonString);
+  }
 }
 
 void handleTransportChange() {
