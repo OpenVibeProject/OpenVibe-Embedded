@@ -133,9 +133,9 @@ void WiFiManager::connectToRemote(const String& url) {
         return;
     }
     
+    path += "register?id=" + String((uint32_t)ESP.getEfuseMac(), HEX);
     wsClient->begin(host, port, path);
     wsClient->onEvent(webSocketClientEventWrapper);
-    wsClient->enableHeartbeat(15000, 3000, 2);
     
     Serial.print("Connecting to remote WebSocket: ");
     Serial.print(host);
@@ -239,9 +239,31 @@ void WiFiManager::onWebSocketClientEvent(WStype_t type, uint8_t* payload, size_t
             retryCount = 0;
             Serial.println("Remote WebSocket connected");
             break;
-        case WStype_TEXT:
+        case WStype_TEXT: {
             Serial.printf("Remote WebSocket received: %s\n", payload);
+            
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, (char*)payload);
+            if (error) {
+                Serial.print("JSON parse failed: ");
+                Serial.println(error.c_str());
+                return;
+            }
+            
+            const char* requestType = doc["requestType"];
+            if (!requestType) return;
+            
+            if (strcmp(requestType, "STATUS") == 0) {
+                extern bool statusRequested;
+                statusRequested = true;
+            } else if (strcmp(requestType, "INTENSITY") == 0) {
+                extern DeviceStats deviceStats;
+                deviceStats.intensity = doc["intensity"];
+                Serial.print("Intensity set to: ");
+                Serial.println(deviceStats.intensity);
+            }
             break;
+        }
         default:
             break;
     }
