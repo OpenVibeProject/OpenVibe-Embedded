@@ -17,6 +17,7 @@
 #define SERVICE_UUID "ec2e0883-782d-433b-9a0c-6d5df5565410"
 #define WIFI_CHAR_UUID "c2433dd7-137e-4e82-845e-a40f70dc4a8d"
 #define STATS_CHAR_UUID "c2433dd7-137e-4e82-845e-a40f70dc4a8e"
+#define MOTOR_PWM_PIN 4
 
 BLEServer *pServer;
 BLEService *pService;
@@ -127,6 +128,8 @@ void loop() {
   static bool lastConnectionState = false;
   static bool wifiManagerStarted = false;
   bool connected = isBLEConnected();
+
+  analogWrite(MOTOR_PWM_PIN, map(deviceStats.intensity, 0, 100, 0, 255));
 
   if (!connected && lastConnectionState) {
     Serial.println("BLE disconnected, restarting advertising...");
