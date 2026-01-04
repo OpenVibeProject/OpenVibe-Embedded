@@ -34,6 +34,9 @@ void updateAndSendStats();
 void handleTransportChange();
 void sendStatusWithNewTransport(TransportMode newTransport, const String& serverAddr = "");
 
+void refreshDeviceStats();
+String buildStatusJson(TransportMode transport, const String& serverAddr = "");
+
 bool isBLEConnected() { return deviceConnected; }
 
 TransportMode lastTransportMode = TRANSPORT_BLE;
@@ -53,7 +56,7 @@ void setup() {
 
   String device_name("OpenVibe");
   String device_id(base64::encode(WiFi.macAddress()));
-  String full_device_name = device_name + device_id;
+  String full_device_name = device_name + "-" + device_id;
   BLEDevice::init(full_device_name.c_str());
 
   pServer = BLEDevice::createServer();
@@ -74,47 +77,15 @@ void setup() {
 }
 
 void updateAndSendStats() {
-  deviceStats.isBluetoothConnected = deviceConnected;
-  deviceStats.isWifiConnected = (WiFi.status() == WL_CONNECTED);
-  deviceStats.macAddress = WiFi.macAddress();
-  deviceStats.ipAddress = deviceStats.isWifiConnected ? WiFi.localIP().toString() : "";
+  refreshDeviceStats();
+  String jsonString = buildStatusJson(deviceStats.transport);
 
-  deviceStats.battery = random(0, 101);
-  deviceStats.isCharging = false;
-
-  DynamicJsonDocument doc(512);
-  unsigned long uptime = millis();
-  doc["intensity"] = deviceStats.intensity;
-  doc["battery"] = deviceStats.battery;
-  doc["isCharging"] = deviceStats.isCharging;
-  doc["isBluetoothConnected"] = deviceStats.isBluetoothConnected;
-  doc["isWifiConnected"] = deviceStats.isWifiConnected;
-  doc["ipAddress"] = deviceStats.ipAddress;
-  doc["macAddress"] = deviceStats.macAddress;
-  doc["version"] = deviceStats.version;
-  doc["deviceId"] = String((uint32_t)ESP.getEfuseMac(), HEX);
-  
-  // Add transport mode to stats
-  const char* transportStr = "BLE";
-  if (deviceStats.transport == TRANSPORT_WIFI) transportStr = "WIFI";
-  else if (deviceStats.transport == TRANSPORT_REMOTE) transportStr = "REMOTE";
-  doc["transport"] = transportStr;
-  
-  if (deviceStats.transport == TRANSPORT_REMOTE && !deviceStats.serverAddress.isEmpty()) {
-    doc["serverAddress"] = deviceStats.serverAddress;
-  }
-
-  String jsonString;
-  serializeJson(doc, jsonString);
-
-  String jsonCopy = jsonString;
-  
   // Send stats based on current transport mode
   if (deviceStats.transport == TRANSPORT_REMOTE && wifiManager.isRemoteConnected()) {
-    wifiManager.sendStats(jsonCopy);
+    wifiManager.sendStats(jsonString);
     Serial.println("Stats sent via Remote WebSocket: " + jsonString);
   } else if (deviceStats.transport == TRANSPORT_WIFI && wifiManager.isWebSocketConnected()) {
-    wifiManager.sendStats(jsonCopy);
+    wifiManager.sendStats(jsonString);
     Serial.println("Stats sent via WiFi WebSocket: " + jsonString);
   } else if (deviceStats.transport == TRANSPORT_BLE && deviceConnected && pStatsCharacteristic != nullptr) {
     pStatsCharacteristic->setValue(jsonString.c_str());
@@ -172,31 +143,13 @@ void sendStatusWithNewTransport(TransportMode newTransport, const String& server
   deviceStats.ipAddress = deviceStats.isWifiConnected ? WiFi.localIP().toString() : "";
   deviceStats.battery = random(0, 101);
   deviceStats.isCharging = false;
+  // Refresh local device-derived fields
+  refreshDeviceStats();
 
-  DynamicJsonDocument doc(512);
-  doc["intensity"] = deviceStats.intensity;
-  doc["battery"] = deviceStats.battery;
-  doc["isCharging"] = deviceStats.isCharging;
-  doc["isBluetoothConnected"] = deviceStats.isBluetoothConnected;
-  doc["isWifiConnected"] = deviceStats.isWifiConnected;
-  doc["ipAddress"] = deviceStats.ipAddress;
-  doc["macAddress"] = deviceStats.macAddress;
-  doc["version"] = deviceStats.version;
-  doc["deviceId"] = String((uint32_t)ESP.getEfuseMac(), HEX);
-  
-  const char* transportStr = "BLE";
-  if (newTransport == TRANSPORT_WIFI) transportStr = "WIFI";
-  else if (newTransport == TRANSPORT_REMOTE) transportStr = "REMOTE";
-  doc["transport"] = transportStr;
-  
-  if (newTransport == TRANSPORT_REMOTE && !serverAddr.isEmpty()) {
-    doc["serverAddress"] = serverAddr;
-  }
+  // Build JSON payload that represents the new transport (but send on the current channel)
+  String jsonString = buildStatusJson(newTransport, serverAddr);
 
-  String jsonString;
-  serializeJson(doc, jsonString);
-  
-  // Send on current transport channel
+  // Send on current transport channel (preserve original behavior)
   if (deviceStats.transport == TRANSPORT_REMOTE && wifiManager.isRemoteConnected()) {
     wifiManager.sendStats(jsonString);
     Serial.println("Status sent via Remote WebSocket: " + jsonString);
@@ -208,6 +161,41 @@ void sendStatusWithNewTransport(TransportMode newTransport, const String& server
     pStatsCharacteristic->notify();
     Serial.println("Status sent via BLE: " + jsonString);
   }
+}
+
+void refreshDeviceStats() {
+  deviceStats.isBluetoothConnected = deviceConnected;
+  deviceStats.isWifiConnected = (WiFi.status() == WL_CONNECTED);
+  deviceStats.macAddress = WiFi.macAddress();
+  deviceStats.ipAddress = deviceStats.isWifiConnected ? WiFi.localIP().toString() : "";
+  deviceStats.battery = random(0, 101);
+  deviceStats.isCharging = false;
+}
+
+String buildStatusJson(TransportMode transport, const String& serverAddr) {
+  JsonDocument doc;
+  doc["intensity"] = deviceStats.intensity;
+  doc["battery"] = deviceStats.battery;
+  doc["isCharging"] = deviceStats.isCharging;
+  doc["isBluetoothConnected"] = deviceStats.isBluetoothConnected;
+  doc["isWifiConnected"] = deviceStats.isWifiConnected;
+  doc["ipAddress"] = deviceStats.ipAddress;
+  doc["macAddress"] = deviceStats.macAddress;
+  doc["version"] = deviceStats.version;
+  doc["deviceId"] = String((uint32_t)ESP.getEfuseMac(), HEX);
+
+  const char* transportStr = "BLE";
+  if (transport == TRANSPORT_WIFI) transportStr = "WIFI";
+  else if (transport == TRANSPORT_REMOTE) transportStr = "REMOTE";
+  doc["transport"] = transportStr;
+
+  if (transport == TRANSPORT_REMOTE && !serverAddr.isEmpty()) {
+    doc["serverAddress"] = serverAddr;
+  }
+
+  String jsonString;
+  serializeJson(doc, jsonString);
+  return jsonString;
 }
 
 void handleTransportChange() {

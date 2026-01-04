@@ -169,7 +169,7 @@ void WiFiManager::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload,
         case WStype_TEXT: {
             Serial.printf("WebSocket received: %s\n", payload);
             
-            DynamicJsonDocument doc(512);
+            JsonDocument doc;
             DeserializationError error = deserializeJson(doc, (char*)payload);
             if (error) {
                 Serial.print("JSON parse failed: ");
@@ -242,7 +242,7 @@ void WiFiManager::onWebSocketClientEvent(WStype_t type, uint8_t* payload, size_t
         case WStype_TEXT: {
             Serial.printf("Remote WebSocket received: %s\n", payload);
             
-            DynamicJsonDocument doc(512);
+            JsonDocument doc;
             DeserializationError error = deserializeJson(doc, (char*)payload);
             if (error) {
                 Serial.print("JSON parse failed: ");

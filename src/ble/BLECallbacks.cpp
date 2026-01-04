@@ -26,7 +26,7 @@ void WiFiConfigCharacteristicHandler::onWrite(BLECharacteristic* characteristic)
   Serial.print("Received via BLE: ");
   Serial.println(value.c_str());
 
-  DynamicJsonDocument doc(512);
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, value.c_str());
   if (error) {
     Serial.print("JSON parse failed: ");
