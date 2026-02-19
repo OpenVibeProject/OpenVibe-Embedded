@@ -1,95 +1,80 @@
 ## OpenVibe-Embedded
 
-Small ESP32 firmware for OpenVibe devices. The firmware exposes a BLE service to receive Wi‑Fi credentials and a statistics characteristic that notifies a connected BLE client with device status JSON.
+Small ESP32 firmware for OpenVibe devices. The firmware provides a robust, non-blocking architecture for managing device state, BLE communication, and multiple Wi‑Fi transport modes (Local WebSocket and Remote WebSocket).
 
-## High Level
-- BLE service used to receive Wi‑Fi credentials (write) and to notify device statistics (notify/read).
-- Connects to Wi‑Fi when credentials are received and reports IP, MAC, uptime and basic mock telemetry via BLE notifications.
+## Core Architecture
 
-## Tech Stack & Versions
-- PlatformIO (project config: `platformio.ini`)
-- Platform: Espressif 32 (platform version used during last build: 6.12.0)
-- Framework: Arduino (Arduino-ESP32, release used in build: framework-arduinoespressif32 @ 3.20017.241212+sha.dcc1105b)
-- Toolchain: xtensa-esp32 @ 8.4.0+2021r2-patch5
-- esptool.py (tool-esptoolpy 4.9.0)
-- Libraries:
-  - ArduinoJson @ 7.4.2
-  - WebSockets @ 2.7.1
-  - ESP32 BLE Arduino (used from PlatformIO library registry; typically 2.0.0)
+The project follows a **Singleton-based Component Architecture**. At its heart is the `DeviceContext`, which orchestrates all subsystems and maintains the source of truth for device state.
 
-These versions reflect the environment used during the most recent successful build. Your local PlatformIO installation may use slightly different package versions; PlatformIO will fetch compatible packages automatically.
+```mermaid
+graph TD
+    Main[main.cpp] --> DC[DeviceContext]
+    DC --> WM[WiFiManager]
+    DC --> BM[BLEManager]
+    DC --> CM[ConfigManager]
+    DC --> DS[DeviceStats Struct]
+    
+    WM -- Events --> DC
+    BM -- Events --> DC
+    BM -- Stats Notify --> BLEClient[BLE Client]
+    WM -- Broadcast --> WSClient[WS Clients]
+    
+    subgraph "Subsystems (Non-Blocking)"
+        WM
+        BM
+    end
+    
+    subgraph "Storage"
+        CM
+    end
+```
+
+### Key Design Principles
+
+- **Singleton Pattern**: Managed components like `DeviceContext` and `ConfigManager` are singletons, ensuring a single source of truth and easy access across translation units without global variables.
+- **Non-Blocking Logic**: All network operations (Wi-Fi connection, WebSocket retries) use asynchronous state machines. The main loop never blocks, ensuring the device remains responsive and BLE connections stable.
+- **Decoupled Components**: Subsystems communicate via `DeviceContext` events rather than direct calls, preventing circular dependencies and making the code easier to maintain.
 
 ## Project Layout
-- `platformio.ini` — PlatformIO configuration (board, libs, upload settings)
-- `src/main.cpp` — application entry: BLE and Wi‑Fi wiring, main loop, stats publishing
-- `src/ble/BLECallbacks.h` & `src/ble/BLECallbacks.cpp` — BLE server and characteristic handlers (Wi‑Fi credentials parsing, connect logic)
-- `include/types/device_stats.h` — `DeviceStats` struct and shared `deviceConnected` declaration
-- `lib/` — project library area (unchanged)
 
-## BLE Details
-- Service UUID: `ec2e0883-782d-433b-9a0c-6d5df5565410`
-- Wi‑Fi config characteristic (write): `c2433dd7-137e-4e82-845e-a40f70dc4a8d`
-  - Expects a JSON payload: `{"ssid":"<ssid>","password":"<password>"}`
-- Stats characteristic (notify/read): `c2433dd7-137e-4e82-845e-a40f70dc4a8e`
-  - Notification payload (example):
-    ```json
-    {
-      "intensity": 50,
-      "battery": 100,
-      "isCharging": false,
-      "isBluetoothConnected": true,
-      "isWifiConnected": true,
-      "ipAddress": "192.168.0.244",
-      "macAddress": "4C:11:AE:65:A2:E8",
-      "version": "1.0.0"
-    }
-    ```
+- `src/main.cpp` — Application entry: delegates entirely to `DeviceContext`.
+- `src/DeviceContext.h/.cpp` — Central orchestrator; owns stats, hardware pins (LED/Motor), and subsystem lifecycle.
+- `src/ConfigManager.h/.cpp` — Centralized NVS (Non-Volatile Storage) management for Wi‑Fi credentials and device settings.
+- `src/ble/BLEManager.h/.cpp` — Encapsulates BLE initialization and notification logic.
+- `src/ble/BLECallbacks.h/.cpp` — Decoupled BLE event handlers.
+- `src/wifi/WiFiManager.h/.cpp` — Non-blocking Wi‑Fi state machine and WebSocket (Server/Client) management.
+- `include/types/device_stats.h` — Pure data structure for device telemetry.
+
+## BLE & WebSockets Details
+
+### BLE Service
+- **Service UUID**: `ec2e0883-782d-433b-9a0c-6d5df5565410`
+- **Wi‑Fi Config (Write)**: `c2433dd7-137e-4e82-845e-a40f70dc4a8d`
+- **Stats (Notify/Read)**: `c2433dd7-137e-4e82-845e-a40f70dc4a8e`
+
+### Transport Modes
+The device supports three transport modes for telemetry and command handling:
+1. **BLE**: Direct low-energy connection.
+2. **WIFI**: Local WebSocket server on port `6969`.
+3. **REMOTE**: Outbound WebSocket client to a centralized server.
 
 ## Hardware required
-- ESP32 development board (ESP32-D0WD core — generic "ESP32 Dev Module" works well)
-- Good-quality USB data cable (power-only cables will not flash)
-- If auto-reset/auto-boot doesn't work on your board, you'll need to use the BOOT (GPIO0) and EN (RESET) buttons during flashing.
-- Optional: USB‑to‑UART adapter with RTS/DTR lines (for consistent auto-reset) or use the board's built-in USB if present.
+- ESP32 development board (generic "ESP32 Dev Module").
+- USB Data Cable.
+- Motor connected to GPIO 4 (PWM).
+- Status LED on GPIO 2.
 
 ## How to build and flash
-1. From VS Code: use the PlatformIO extension build & upload buttons.
-2. From the CLI (uses the project's PlatformIO venv if you want to match the environment used here):
+1. From VS Code: use the PlatformIO extension.
+2. From the CLI:
 
-```fish
-# Build
-~/.platformio/penv/bin/platformio run -e esp32dev
+```bash
+# Build & Upload
+pio run -t upload
 
-# Upload (explicit port can be overridden by platformio.ini)
-~/.platformio/penv/bin/platformio run -e esp32dev -t upload --upload-port /dev/ttyUSB0
-
-# Open serial monitor at 115200
-~/.platformio/penv/bin/platformio device monitor -e esp32dev --port /dev/ttyUSB0 --baud 115200
+# Monitor
+pio device monitor
 ```
-
-If you use the PlatformIO CLI installed globally, you can replace `~/.platformio/penv/bin/platformio` with `platformio`.
-
-## Troubleshooting
-- Permission denied opening `/dev/ttyUSB0`: add your user to the appropriate group:
-
-```fish
-# On most Debian/Ubuntu: dialout
-sudo usermod -a -G dialout $USER
-# On Arch or systems that use uucp for serial devices
-sudo usermod -a -G uucp $USER
-```
-
-Log out and log back in for group changes to take effect.
-
-- If uploads fail with "No serial data received" or similar:
-  - Try a different USB cable (must be data-capable).
-  - Try another USB port (rear ports on desktops are preferable).
-  - Try lowering upload speed in `platformio.ini` (this project uses 115200 by default).
-  - Try manual BOOT/EN procedure: hold BOOT (GPIO0), press and release EN (reset), then release BOOT right before or when the upload starts.
-  - Make sure no serial monitor or other process is holding the port (kill `platformio home` or any `minicom/screen` instance).
-
-## Development Notes
-- The code was modularized so BLE callbacks live under `src/ble/`, and the `DeviceStats` type is in `include/types/` so it can be included across files.
-- There are some ArduinoJson warnings about `DynamicJsonDocument` deprecation; consider switching to `StaticJsonDocument` or `JsonDocument` with a statically-sized buffer if you want to remove warnings.
 
 ## License
-This repository includes an MIT license (see `LICENSE` in the project root).
+MIT License. See `LICENSE` in project root.

@@ -1,101 +1,80 @@
 #include "BLECallbacks.h"
-#include "../../include/types/device_stats.h"
-#include "../wifi/WiFiCredentials.h"
-#include <BLEDevice.h>
+#include "../DeviceContext.h"
+#include "../ConfigManager.h"
+#include "../wifi/WiFiManager.h"
 #include <ArduinoJson.h>
-#include <WiFi.h>
-#include <Arduino.h>
 
-void updateAndSendStats();
-void sendStatusWithNewTransport(TransportMode newTransport, const String& serverAddr = "");
+// ── Server connect / disconnect ──────────────────────────────────────
 
 void BLEServerHandler::onConnect(BLEServer* server) {
-  deviceConnected = true;
-  Serial.println("BLE Client connected!");
+    DeviceContext::getInstance().onBLEConnected();
 }
 
 void BLEServerHandler::onDisconnect(BLEServer* server) {
-  deviceConnected = false;
-  Serial.println("BLE Client disconnected!");
+    DeviceContext::getInstance().onBLEDisconnected();
+    BLEDevice::startAdvertising();   // resume advertising
 }
 
+// ── Write handler for the WiFi / command characteristic ──────────────
+
 void WiFiConfigCharacteristicHandler::onWrite(BLECharacteristic* characteristic) {
-  std::string value = characteristic->getValue();
-  if (value.length() == 0) return;
+    std::string raw = characteristic->getValue();
+    if (raw.empty()) return;
 
-  Serial.print("Received via BLE: ");
-  Serial.println(value.c_str());
+    Serial.printf("[BLE] Received: %s\n", raw.c_str());
 
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, value.c_str());
-  if (error) {
-    Serial.print("JSON parse failed: ");
-    Serial.println(error.c_str());
-    return;
-  }
-
-  const char* requestType = doc["requestType"];
-  if (!requestType) return;
-
-  if (strcmp(requestType, "STATUS") == 0) {
-    extern bool statusRequested;
-    statusRequested = true;
-  } else if (strcmp(requestType, "INTENSITY") == 0) {
-    extern DeviceStats deviceStats;
-    deviceStats.intensity = doc["intensity"];
-    Serial.print("Intensity set to: ");
-    Serial.println(deviceStats.intensity);
-  } else if (strcmp(requestType, "WIFI_CREDENTIALS") == 0) {
-    const char* ssid = doc["ssid"];
-    const char* password = doc["password"];
-    Serial.print("Connecting to Wi-Fi SSID: ");
-    Serial.println(ssid);
-
-    WiFi.begin(ssid, password);
-
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      delay(500);
-      Serial.print(".");
-      attempts++;
+    JsonDocument doc;
+    if (deserializeJson(doc, raw.c_str())) {
+        Serial.println("[BLE] JSON parse failed");
+        return;
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nWi-Fi connected!");
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
-      WiFiCredentials::save(ssid, password);
-      extern bool statusRequested;
-      statusRequested = true;
-    } else {
-      Serial.println("\nFailed to connect to Wi-Fi.");
+    DeviceContext& ctx = DeviceContext::getInstance();
+    ConfigManager& cfg = ConfigManager::getInstance();
+
+    const char* req = doc["requestType"];
+    if (!req) return;
+
+    // ── STATUS ───────────────────────────────────────────────────────
+    if (strcmp(req, "STATUS") == 0) {
+        ctx.requestStatusBroadcast();
     }
-  } else if (strcmp(requestType, "SWITCH_TRANSPORT") == 0) {
-    extern DeviceStats deviceStats;
-    
-    const char* transport = doc["transport"];
-    TransportMode newTransport = deviceStats.transport;
-    String serverAddr = "";
-    
-    if (strcmp(transport, "BLE") == 0) {
-      newTransport = TRANSPORT_BLE;
-    } else if (strcmp(transport, "WIFI") == 0) {
-      newTransport = TRANSPORT_WIFI;
-    } else if (strcmp(transport, "REMOTE") == 0) {
-      newTransport = TRANSPORT_REMOTE;
-      const char* serverAddress = doc["serverAddress"];
-      if (serverAddress) {
-        serverAddr = String(serverAddress);
-      }
+    // ── INTENSITY ────────────────────────────────────────────────────
+    else if (strcmp(req, "INTENSITY") == 0) {
+        int val = doc["intensity"].as<int>();
+        ctx.getStats().intensity = constrain(val, 0, 100);
+        Serial.printf("[BLE] Intensity → %d\n", ctx.getStats().intensity);
     }
-    
-    sendStatusWithNewTransport(newTransport, serverAddr);
-    
-    deviceStats.transport = newTransport;
-    if (!serverAddr.isEmpty()) {
-      deviceStats.serverAddress = serverAddr;
+    // ── WIFI_CREDENTIALS (non-blocking!) ─────────────────────────────
+    else if (strcmp(req, "WIFI_CREDENTIALS") == 0) {
+        const char* ssid = doc["ssid"];
+        const char* pass = doc["password"];
+        if (!ssid) return;
+
+        Serial.printf("[BLE] Saving WiFi creds for \"%s\"\n", ssid);
+        cfg.setWiFiCredentials(ssid, pass ? pass : "");
+
+        WiFiManager* wifi = ctx.getWiFiManager();
+        if (wifi) wifi->connect();   // returns immediately
     }
-    Serial.print("Switched to transport: ");
-    Serial.println(newTransport);
-  }
+    // ── SWITCH_TRANSPORT ─────────────────────────────────────────────
+    else if (strcmp(req, "SWITCH_TRANSPORT") == 0) {
+        const char* t = doc["transport"];
+        if (!t) return;
+
+        TransportMode mode = ctx.getTransport();
+        if      (strcmp(t, "BLE")    == 0) mode = TRANSPORT_BLE;
+        else if (strcmp(t, "WIFI")   == 0) mode = TRANSPORT_WIFI;
+        else if (strcmp(t, "REMOTE") == 0) {
+            mode = TRANSPORT_REMOTE;
+            const char* addr = doc["serverAddress"];
+            if (addr) {
+                cfg.setRemoteServer(addr);
+                ctx.getStats().serverAddress = String(addr);
+            }
+        }
+
+        ctx.setTransport(mode);
+        Serial.printf("[BLE] Transport → %s\n", t);
+    }
 }

@@ -1,288 +1,340 @@
 #include "WiFiManager.h"
-#include "../../include/types/device_stats.h"
+#include "../DeviceContext.h"
+#include "../ConfigManager.h"
 #include <WiFi.h>
-#include <Arduino.h>
-#include <ArduinoJson.h>
-#include <WebSocketsClient.h>
 
 WiFiManager* WiFiManager::instance = nullptr;
 
-WiFiManager::WiFiManager() : webSocket(nullptr), wsClient(nullptr), wsConnected(false), wsClientConnected(false), lastRetryTime(0), retryCount(0) {
+// ── Constructor ──────────────────────────────────────────────────────
+
+WiFiManager::WiFiManager()
+    : wifiState(WIFI_IDLE)
+    , wifiStateStart(0)
+    , wsServer(nullptr)
+    , wsServerHasClient(false)
+    , wsClient(nullptr)
+    , wsClientConnected(false)
+    , lastRemoteRetry(0)
+    , remoteRetryCount(0)
+{
     instance = this;
 }
 
+// ── Lifecycle ────────────────────────────────────────────────────────
+
 void WiFiManager::begin() {
-    // WiFiManager is initialized but WebSocket connections are started based on transport mode
+    WiFi.mode(WIFI_STA);
+
+    if (ConfigManager::getInstance().hasWiFiCredentials()) {
+        connect();
+    }
 }
 
 void WiFiManager::loop() {
-    if (webSocket) {
-        webSocket->loop();
-    }
-    if (wsClient) {
-        wsClient->loop();
-    }
-    retryRemoteConnection();
+    handleWiFiState();
+
+    if (wsServer) wsServer->loop();
+    if (wsClient) wsClient->loop();
+
+    retryRemoteIfNeeded();
 }
 
-void WiFiManager::sendStats(String& statsJson) {
-    extern DeviceStats deviceStats;
-    
-    if (deviceStats.transport == TRANSPORT_REMOTE && wsClient && wsClientConnected) {
-        wsClient->sendTXT(statsJson);
-    } else if (webSocket && wsConnected) {
-        webSocket->broadcastTXT(statsJson);
+// ── WiFi connection (non-blocking) ───────────────────────────────────
+
+void WiFiManager::connect() {
+    ConfigManager& cfg = ConfigManager::getInstance();
+    String ssid = cfg.getWiFiSSID();
+    String pass = cfg.getWiFiPassword();
+
+    if (ssid.isEmpty()) {
+        Serial.println("[WiFi] No credentials stored");
+        updateWiFiState(WIFI_DISCONNECTED);
+        return;
+    }
+
+    Serial.printf("[WiFi] Connecting to \"%s\"...\n", ssid.c_str());
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    updateWiFiState(WIFI_CONNECTING);
+}
+
+void WiFiManager::disconnect() {
+    WiFi.disconnect();
+    stopWebSocketServer();
+    disconnectRemote();
+    updateWiFiState(WIFI_DISCONNECTED);
+}
+
+bool WiFiManager::isWiFiConnected() const {
+    return wifiState == WIFI_CONNECTED;
+}
+
+void WiFiManager::updateWiFiState(WiFiState s) {
+    wifiState      = s;
+    wifiStateStart = millis();
+
+    DeviceContext& ctx = DeviceContext::getInstance();
+
+    switch (s) {
+        case WIFI_CONNECTED:
+            ctx.onWiFiConnected();
+            // Auto-start appropriate transport
+            if (ctx.getTransport() == TRANSPORT_WIFI)   startWebSocketServer();
+            if (ctx.getTransport() == TRANSPORT_REMOTE)  connectToRemote();
+            break;
+
+        case WIFI_DISCONNECTED:
+        case WIFI_CONNECTION_FAILED:
+            ctx.onWiFiDisconnected();
+            break;
+
+        default:
+            break;
     }
 }
 
-bool WiFiManager::isWebSocketConnected() {
-    extern DeviceStats deviceStats;
-    
-    if (deviceStats.transport == TRANSPORT_REMOTE) {
-        return wsClientConnected;
+void WiFiManager::handleWiFiState() {
+    switch (wifiState) {
+        case WIFI_CONNECTING:
+            if (WiFi.status() == WL_CONNECTED) {
+                updateWiFiState(WIFI_CONNECTED);
+            } else if (millis() - wifiStateStart > CONNECT_TIMEOUT_MS) {
+                Serial.println("[WiFi] Connection timeout");
+                updateWiFiState(WIFI_CONNECTION_FAILED);
+            }
+            break;
+
+        case WIFI_CONNECTED:
+            if (WiFi.status() != WL_CONNECTED) {
+                Serial.println("[WiFi] Connection lost — reconnecting");
+                updateWiFiState(WIFI_DISCONNECTED);
+                connect();
+            }
+            break;
+
+        default:
+            break;
     }
-    return wsConnected;
 }
 
-bool WiFiManager::isRemoteConnected() {
-    return wsClientConnected;
+// ── Transport change ─────────────────────────────────────────────────
+
+void WiFiManager::handleTransportChange(TransportMode oldMode, TransportMode newMode) {
+    // Tear down old transport channel
+    if (oldMode == TRANSPORT_WIFI)   stopWebSocketServer();
+    if (oldMode == TRANSPORT_REMOTE) disconnectRemote();
+
+    // Bring up new one (only if WiFi is already connected)
+    if (wifiState != WIFI_CONNECTED) return;
+    if (newMode == TRANSPORT_WIFI)   startWebSocketServer();
+    if (newMode == TRANSPORT_REMOTE) connectToRemote();
 }
+
+// ── WebSocket server ─────────────────────────────────────────────────
 
 void WiFiManager::startWebSocketServer() {
-    if (WiFi.status() != WL_CONNECTED || webSocket) return;
-    
-    webSocket = new WebSocketsServer(6969);
-    webSocket->begin();
-    webSocket->onEvent(webSocketEventWrapper);
-    
-    Serial.println("WebSocket server started on port 6969");
-    Serial.print("WebSocket URL: ws://");
-    Serial.print(WiFi.localIP());
-    Serial.println(":6969");
+    if (wsServer) return;
+
+    wsServer = new WebSocketsServer(6969);
+    wsServer->begin();
+    wsServer->onEvent(wsServerEventWrapper);
+
+    Serial.printf("[WS-Server] Listening on ws://%s:6969\n",
+                  WiFi.localIP().toString().c_str());
 }
 
 void WiFiManager::stopWebSocketServer() {
-    if (webSocket) {
-        delete webSocket;
-        webSocket = nullptr;
-        wsConnected = false;
-        Serial.println("WebSocket server stopped");
+    if (!wsServer) return;
+    wsServer->close();
+    delete wsServer;
+    wsServer          = nullptr;
+    wsServerHasClient = false;
+}
+
+void WiFiManager::wsServerEventWrapper(uint8_t num, WStype_t type, uint8_t* payload, size_t len) {
+    if (instance) instance->onWsServerEvent(num, type, payload, len);
+}
+
+void WiFiManager::onWsServerEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t len) {
+    switch (type) {
+        case WStype_CONNECTED:
+            wsServerHasClient = true;
+            Serial.printf("[WS-Server] Client #%u connected\n", num);
+            break;
+        case WStype_DISCONNECTED:
+            wsServerHasClient = false;
+            Serial.printf("[WS-Server] Client #%u disconnected\n", num);
+            break;
+        case WStype_TEXT:
+            processIncomingJson(payload);
+            break;
+        default: break;
     }
+}
+
+// ── WebSocket client (remote) ────────────────────────────────────────
+
+void WiFiManager::connectToRemote() {
+    ConfigManager& cfg = ConfigManager::getInstance();
+    String url = cfg.getRemoteServer();
+
+    if (url.isEmpty()) {
+        Serial.println("[WS-Client] No remote URL configured");
+        return;
+    }
+
+    disconnectRemote();
+
+    // ── Parse ws://host:port/path ────────────────────────────────────
+    String host;
+    int    port = 80;
+    String path = "/";
+
+    if (!url.startsWith("ws://")) {
+        Serial.println("[WS-Client] Invalid URL (expected ws://)");
+        return;
+    }
+
+    String body = url.substring(5);
+    int colon = body.indexOf(':');
+    int slash = body.indexOf('/');
+
+    if (colon > 0) {
+        host = body.substring(0, colon);
+        port = (slash > colon)
+             ? body.substring(colon + 1, slash).toInt()
+             : body.substring(colon + 1).toInt();
+        if (slash > 0) path = body.substring(slash);
+    } else {
+        host = (slash > 0) ? body.substring(0, slash) : body;
+        if (slash > 0) path = body.substring(slash);
+    }
+
+    // Append device registration path
+    String deviceId = String((uint32_t)ESP.getEfuseMac(), HEX);
+    if (!path.endsWith("/")) path += "/";
+    path += "register?id=" + deviceId;
+
+    wsClient = new WebSocketsClient();
+    wsClient->begin(host, port, path);
+    wsClient->onEvent(wsClientEventWrapper);
+    lastRemoteRetry  = millis();
+    remoteRetryCount = 0;
+
+    Serial.printf("[WS-Client] Connecting to %s:%d%s\n",
+                  host.c_str(), port, path.c_str());
 }
 
 void WiFiManager::disconnectRemote() {
-    if (wsClient) {
-        delete wsClient;
-        wsClient = nullptr;
-        wsClientConnected = false;
-        Serial.println("Remote WebSocket disconnected");
-    }
+    if (!wsClient) return;
+    delete wsClient;
+    wsClient          = nullptr;
+    wsClientConnected = false;
+    remoteRetryCount  = 0;
 }
 
-void WiFiManager::connectToRemote(const String& url) {
-    disconnectRemote();
-    
-    if (url.isEmpty()) {
-        Serial.println("Remote URL is empty");
-        return;
-    }
-    
-    serverAddress = url;
-    retryCount = 0;
-    lastRetryTime = 0;
-    
-    wsClient = new WebSocketsClient();
-    
-    // Parse URL - simple implementation for ws://host:port format
-    String host;
-    int port = 80;
-    String path = "/";
-    
-    if (url.startsWith("ws://")) {
-        String urlPart = url.substring(5); // Remove "ws://"
-        int colonIndex = urlPart.indexOf(':');
-        int slashIndex = urlPart.indexOf('/');
-        
-        if (colonIndex > 0) {
-            host = urlPart.substring(0, colonIndex);
-            if (slashIndex > 0) {
-                port = urlPart.substring(colonIndex + 1, slashIndex).toInt();
-                path = urlPart.substring(slashIndex);
-            } else {
-                port = urlPart.substring(colonIndex + 1).toInt();
-            }
-        } else {
-            if (slashIndex > 0) {
-                host = urlPart.substring(0, slashIndex);
-                path = urlPart.substring(slashIndex);
-            } else {
-                host = urlPart;
-            }
-        }
-    } else {
-        Serial.println("Invalid WebSocket URL format. Expected ws://host:port/path");
-        delete wsClient;
-        wsClient = nullptr;
-        return;
-    }
-    
-    if (host.isEmpty()) {
-        Serial.println("Invalid host in WebSocket URL");
-        delete wsClient;
-        wsClient = nullptr;
-        return;
-    }
-    
-    path += "register?id=" + String((uint32_t)ESP.getEfuseMac(), HEX);
-    wsClient->begin(host, port, path);
-    wsClient->onEvent(webSocketClientEventWrapper);
-    
-    Serial.print("Connecting to remote WebSocket: ");
-    Serial.print(host);
-    Serial.print(":");
-    Serial.print(port);
-    Serial.println(path);
+bool WiFiManager::isRemoteConnected() const {
+    return wsClientConnected;
 }
 
-void WiFiManager::webSocketEventWrapper(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
-    if (instance) {
-        instance->onWebSocketEvent(num, type, payload, length);
-    }
+void WiFiManager::wsClientEventWrapper(WStype_t type, uint8_t* payload, size_t len) {
+    if (instance) instance->onWsClientEvent(type, payload, len);
 }
 
-void WiFiManager::webSocketClientEventWrapper(WStype_t type, uint8_t* payload, size_t length) {
-    if (instance) {
-        instance->onWebSocketClientEvent(type, payload, length);
-    }
-}
-
-void WiFiManager::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
-    switch(type) {
-        case WStype_DISCONNECTED:
-            wsConnected = false;
-            Serial.printf("WebSocket client %u disconnected\n", num);
-            break;
-        case WStype_CONNECTED:
-            wsConnected = true;
-            Serial.printf("WebSocket client %u connected from %s\n", num, webSocket->remoteIP(num).toString().c_str());
-            break;
-        case WStype_TEXT: {
-            Serial.printf("WebSocket received: %s\n", payload);
-            
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, (char*)payload);
-            if (error) {
-                Serial.print("JSON parse failed: ");
-                Serial.println(error.c_str());
-                return;
-            }
-            
-            const char* requestType = doc["requestType"];
-            if (!requestType) return;
-            
-            if (strcmp(requestType, "STATUS") == 0) {
-                extern bool statusRequested;
-                statusRequested = true;
-            } else if (strcmp(requestType, "INTENSITY") == 0) {
-                extern DeviceStats deviceStats;
-                deviceStats.intensity = doc["intensity"];
-                Serial.print("Intensity set to: ");
-                Serial.println(deviceStats.intensity);
-            } else if (strcmp(requestType, "SWITCH_TRANSPORT") == 0) {
-                extern DeviceStats deviceStats;
-                extern void sendStatusWithNewTransport(TransportMode newTransport, const String& serverAddr);
-                
-                const char* transport = doc["transport"];
-                TransportMode newTransport = deviceStats.transport;
-                String serverAddr = "";
-                
-                if (strcmp(transport, "BLE") == 0) {
-                    newTransport = TRANSPORT_BLE;
-                } else if (strcmp(transport, "WIFI") == 0) {
-                    newTransport = TRANSPORT_WIFI;
-                } else if (strcmp(transport, "REMOTE") == 0) {
-                    newTransport = TRANSPORT_REMOTE;
-                    const char* serverAddress = doc["serverAddress"];
-                    if (serverAddress) {
-                        serverAddr = String(serverAddress);
-                    }
-                }
-                
-                sendStatusWithNewTransport(newTransport, serverAddr);
-                
-                deviceStats.transport = newTransport;
-                if (!serverAddr.isEmpty()) {
-                    deviceStats.serverAddress = serverAddr;
-                }
-                Serial.print("Switched to transport: ");
-                Serial.println(newTransport);
-            }
-            break;
-        }
-        default:
-            break;
-    }
-}
-
-void WiFiManager::onWebSocketClientEvent(WStype_t type, uint8_t* payload, size_t length) {
-    switch(type) {
-        case WStype_DISCONNECTED:
-            wsClientConnected = false;
-            Serial.println("Remote WebSocket disconnected");
-            if (retryCount < MAX_RETRIES) {
-                lastRetryTime = millis();
-                Serial.printf("Will retry in %lu seconds (attempt %d/%d)\n", RETRY_INTERVAL/1000, retryCount+1, MAX_RETRIES);
-            }
-            break;
+void WiFiManager::onWsClientEvent(WStype_t type, uint8_t* payload, size_t len) {
+    switch (type) {
         case WStype_CONNECTED:
             wsClientConnected = true;
-            retryCount = 0;
-            Serial.println("Remote WebSocket connected");
+            remoteRetryCount  = 0;
+            Serial.println("[WS-Client] Connected to remote");
             break;
-        case WStype_TEXT: {
-            Serial.printf("Remote WebSocket received: %s\n", payload);
-            
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, (char*)payload);
-            if (error) {
-                Serial.print("JSON parse failed: ");
-                Serial.println(error.c_str());
-                return;
-            }
-            
-            const char* requestType = doc["requestType"];
-            if (!requestType) return;
-            
-            if (strcmp(requestType, "STATUS") == 0) {
-                extern bool statusRequested;
-                statusRequested = true;
-            } else if (strcmp(requestType, "INTENSITY") == 0) {
-                extern DeviceStats deviceStats;
-                deviceStats.intensity = doc["intensity"];
-                Serial.print("Intensity set to: ");
-                Serial.println(deviceStats.intensity);
-            }
+
+        case WStype_DISCONNECTED:
+            wsClientConnected = false;
+            lastRemoteRetry   = millis();
+            Serial.println("[WS-Client] Disconnected from remote");
             break;
-        }
-        default:
+
+        case WStype_TEXT:
+            processIncomingJson(payload);
             break;
+
+        default: break;
     }
 }
 
-void WiFiManager::retryRemoteConnection() {
-    extern DeviceStats deviceStats;
-    
-    if (deviceStats.transport != TRANSPORT_REMOTE || serverAddress.isEmpty() || wsClientConnected) {
+void WiFiManager::retryRemoteIfNeeded() {
+    DeviceContext& ctx = DeviceContext::getInstance();
+
+    if (ctx.getTransport() != TRANSPORT_REMOTE) return;
+    if (wifiState != WIFI_CONNECTED)             return;
+    if (wsClientConnected)                        return;
+    if (remoteRetryCount >= MAX_REMOTE_RETRIES)   return;
+    if (millis() - lastRemoteRetry < REMOTE_RETRY_MS) return;
+
+    remoteRetryCount++;
+    Serial.printf("[WS-Client] Retry %d/%d\n", remoteRetryCount, MAX_REMOTE_RETRIES);
+    connectToRemote();
+}
+
+// ── Send ─────────────────────────────────────────────────────────────
+
+void WiFiManager::sendStats(String& json) {
+    if (wsServer && wsServerHasClient) {
+        wsServer->broadcastTXT(json);
+    }
+    if (wsClient && wsClientConnected) {
+        wsClient->sendTXT(json);
+    }
+}
+
+// ── Incoming JSON ────────────────────────────────────────────────────
+
+void WiFiManager::processIncomingJson(uint8_t* payload) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, (char*)payload);
+    if (err) {
+        Serial.printf("[WS] JSON parse error: %s\n", err.c_str());
         return;
     }
-    
-    if (retryCount >= MAX_RETRIES) {
-        return;
-    }
-    
-    if (lastRetryTime > 0 && (millis() - lastRetryTime) >= RETRY_INTERVAL) {
-        retryCount++;
-        Serial.printf("Retrying remote WebSocket connection (attempt %d/%d)\n", retryCount, MAX_RETRIES);
-        connectToRemote(serverAddress);
+
+    DeviceContext& ctx    = DeviceContext::getInstance();
+    ConfigManager& cfg    = ConfigManager::getInstance();
+    const char* reqType   = doc["requestType"];
+
+    if (!reqType) return;
+
+    if (strcmp(reqType, "STATUS") == 0) {
+        ctx.requestStatusBroadcast();
+
+    } else if (strcmp(reqType, "INTENSITY") == 0) {
+        int val = doc["intensity"].as<int>();
+        ctx.getStats().intensity = constrain(val, 0, 100);
+        Serial.printf("[WS] Intensity → %d\n", ctx.getStats().intensity);
+
+    } else if (strcmp(reqType, "SWITCH_TRANSPORT") == 0) {
+        const char* t = doc["transport"];
+        if (!t) return;
+
+        TransportMode mode = ctx.getTransport();
+        if      (strcmp(t, "BLE")    == 0) mode = TRANSPORT_BLE;
+        else if (strcmp(t, "WIFI")   == 0) mode = TRANSPORT_WIFI;
+        else if (strcmp(t, "REMOTE") == 0) {
+            mode = TRANSPORT_REMOTE;
+            const char* addr = doc["serverAddress"];
+            if (addr) {
+                cfg.setRemoteServer(addr);
+                ctx.getStats().serverAddress = String(addr);
+            }
+        }
+        ctx.setTransport(mode);
+        Serial.printf("[WS] Transport → %s\n", t);
+
+    } else if (strcmp(reqType, "WIFI_CREDENTIALS") == 0) {
+        const char* ssid = doc["ssid"];
+        const char* pass = doc["password"];
+        if (ssid) {
+            cfg.setWiFiCredentials(ssid, pass ? pass : "");
+            connect();
+        }
     }
 }
