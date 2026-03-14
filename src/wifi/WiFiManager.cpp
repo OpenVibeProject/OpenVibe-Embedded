@@ -12,6 +12,7 @@ WiFiManager::WiFiManager()
     , wifiStateStart(0)
     , wsServer(nullptr)
     , wsServerHasClient(false)
+    , restServer(nullptr)
     , wsClient(nullptr)
     , wsClientConnected(false)
     , lastRemoteRetry(0)
@@ -35,6 +36,7 @@ void WiFiManager::loop() {
 
     if (wsServer) wsServer->loop();
     if (wsClient) wsClient->loop();
+    if (restServer) restServer->handleClient();
 
     retryRemoteIfNeeded();
 }
@@ -60,12 +62,37 @@ void WiFiManager::connect() {
 void WiFiManager::disconnect() {
     WiFi.disconnect();
     stopWebSocketServer();
+    stopRestServer();
     disconnectRemote();
     updateWiFiState(WIFI_DISCONNECTED);
 }
 
 bool WiFiManager::isWiFiConnected() const {
     return wifiState == WIFI_CONNECTED;
+}
+
+void WiFiManager::scanNetworks() {
+    Serial.println("[WiFi] Scanning for networks...");
+    
+    // Explicitly scan in station mode
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(); // Ensure we are not trying to connect during scan
+
+    int n = WiFi.scanNetworks(false, true); // show_hidden = false, passive = true for better stability
+    if (n == 0) {
+        Serial.println("[WiFi] No networks found");
+    } else {
+        Serial.printf("[WiFi] Found %d networks:\n", n);
+        for (int i = 0; i < n; ++i) {
+            Serial.printf("[WiFi]  - %s (RSSI: %d, Ch: %d)\n", 
+                          WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
+        }
+    }
+    
+    // CRITICAL: Clean up scan results and reset WiFi state
+    WiFi.scanDelete();
+    WiFi.disconnect(); 
+    delay(100); // Short breather for the hardware
 }
 
 void WiFiManager::updateWiFiState(WiFiState s) {
@@ -80,6 +107,7 @@ void WiFiManager::updateWiFiState(WiFiState s) {
             // Auto-start appropriate transport
             if (ctx.getTransport() == TRANSPORT_WIFI)   startWebSocketServer();
             if (ctx.getTransport() == TRANSPORT_REMOTE)  connectToRemote();
+            startRestServer();
             break;
 
         case WIFI_DISCONNECTED:
@@ -169,6 +197,89 @@ void WiFiManager::onWsServerEvent(uint8_t num, WStype_t type, uint8_t* payload, 
             break;
         default: break;
     }
+}
+
+// ── REST API server ──────────────────────────────────────────────────
+
+void WiFiManager::startRestServer() {
+    if (restServer) return;
+
+    restServer = new WebServer(80);
+    
+    // Enable CORS for all routes by handling OPTIONS
+    restServer->onNotFound(handleNotFoundStatic);
+    // Explicitly handle OPTIONS for common routes
+    restServer->on("/status", HTTP_OPTIONS, handleOptionsStatic);
+    restServer->on("/intensity", HTTP_OPTIONS, handleOptionsStatic);
+    
+    restServer->on("/status", HTTP_GET, handleGetStatusStatic);
+    restServer->on("/intensity", HTTP_POST, handlePostIntensityStatic);
+
+    restServer->begin();
+    Serial.printf("[REST-Server] Listening on http://%s:80\n",
+                  WiFi.localIP().toString().c_str());
+}
+
+void WiFiManager::stopRestServer() {
+    if (!restServer) return;
+    restServer->close();
+    delete restServer;
+    restServer = nullptr;
+}
+
+void WiFiManager::handleOptionsStatic() {
+    if (!instance || !instance->restServer) return;
+    instance->restServer->sendHeader("Access-Control-Allow-Origin", "*");
+    instance->restServer->sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    instance->restServer->sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    instance->restServer->send(204);
+}
+
+void WiFiManager::handleNotFoundStatic() {
+    if (!instance || !instance->restServer) return;
+    if (instance->restServer->method() == HTTP_OPTIONS) {
+        handleOptionsStatic();
+        return;
+    }
+    instance->restServer->sendHeader("Access-Control-Allow-Origin", "*");
+    instance->restServer->send(404, "text/plain", "Not Found");
+}
+
+void WiFiManager::handleGetStatusStatic() {
+    if (!instance || !instance->restServer) return;
+    String json = DeviceContext::getInstance().buildStatusJson();
+    instance->restServer->sendHeader("Access-Control-Allow-Origin", "*");
+    instance->restServer->send(200, "application/json", json);
+}
+
+void WiFiManager::handlePostIntensityStatic() {
+    if (!instance || !instance->restServer) return;
+    instance->restServer->sendHeader("Access-Control-Allow-Origin", "*");
+
+    if (!instance->restServer->hasArg("plain")) {
+        instance->restServer->send(400, "application/json", "{\"error\":\"No payload\"}");
+        return;
+    }
+    String body = instance->restServer->arg("plain");
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, body);
+    if (err) {
+        instance->restServer->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+    if (!doc.containsKey("intensity")) {
+        instance->restServer->send(400, "application/json", "{\"error\":\"Missing intensity field\"}");
+        return;
+    }
+
+    int val = doc["intensity"].as<int>();
+    DeviceContext::getInstance().getStats().intensity = constrain(val, 0, 100);
+    Serial.printf("[REST] Intensity -> %d\n", DeviceContext::getInstance().getStats().intensity);
+    
+    // Broadcast change to other clients
+    DeviceContext::getInstance().requestStatusBroadcast();
+
+    instance->restServer->send(200, "application/json", "{\"status\":\"ok\"}");
 }
 
 // ── WebSocket client (remote) ────────────────────────────────────────

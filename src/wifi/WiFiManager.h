@@ -3,6 +3,7 @@
 
 #include <WebSocketsServer.h>
 #include <WebSocketsClient.h>
+#include <WebServer.h>
 #include <ArduinoJson.h>
 #include "../../include/types/device_stats.h"   // TransportMode only
 
@@ -24,6 +25,7 @@ public:
     // WiFi connection (non-blocking)
     void connect();
     void disconnect();
+    void scanNetworks();
     bool isWiFiConnected() const;
 
     // Transport change hook
@@ -32,6 +34,10 @@ public:
     // WebSocket server (local clients via TRANSPORT_WIFI)
     void startWebSocketServer();
     void stopWebSocketServer();
+
+    // REST API server (local clients via WiFi)
+    void startRestServer();
+    void stopRestServer();
 
     // WebSocket client (remote server via TRANSPORT_REMOTE)
     void connectToRemote();
@@ -63,6 +69,14 @@ private:
 
     static void wsServerEventWrapper(uint8_t num, WStype_t type, uint8_t* payload, size_t len);
     void onWsServerEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t len);
+
+    // ── REST API server ──────────────────────────────────────────────
+    WebServer* restServer;
+
+    static void handleGetStatusStatic();
+    static void handlePostIntensityStatic();
+    static void handleNotFoundStatic();
+    static void handleOptionsStatic();
 
     // ── WebSocket client (remote) ────────────────────────────────────
     WebSocketsClient* wsClient;

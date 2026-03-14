@@ -36,6 +36,7 @@ void DeviceContext::setup() {
 
     // ── WiFi ─────────────────────────────────────────────────────────
     wifiMgr = new WiFiManager();
+    wifiMgr->scanNetworks();
     wifiMgr->begin();
 
     // ── Restore transport ────────────────────────────────────────────
